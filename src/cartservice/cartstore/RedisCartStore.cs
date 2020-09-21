@@ -18,6 +18,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using cartservice.interfaces;
+using Dynatrace.OneAgent.Sdk.Api;
+using Dynatrace.OneAgent.Sdk.Api.Enums;
+using Dynatrace.OneAgent.Sdk.Api.Infos;
 using Google.Protobuf;
 using Grpc.Core;
 using Hipstershop;
@@ -39,6 +42,8 @@ namespace cartservice.cartstore
 
         private readonly ConfigurationOptions redisConnectionOptions;
 
+        IOneAgentSdk oneAgentSdk;
+        IDatabaseInfo dbInfo;
         public RedisCartStore(string redisAddress)
         {
             // Serialize empty cart into byte array.
@@ -53,6 +58,10 @@ namespace cartservice.cartstore
             redisConnectionOptions.ReconnectRetryPolicy = new ExponentialRetry(100);
 
             redisConnectionOptions.KeepAlive = 180;
+
+            oneAgentSdk = OneAgentSdkFactory.CreateInstance();
+            dbInfo = oneAgentSdk.CreateDatabaseInfo("Cache", "Redis", ChannelType.TCP_IP, redisAddress);
+
         }
 
         public Task InitializeAsync()
@@ -119,10 +128,15 @@ namespace cartservice.cartstore
             {
                 EnsureRedisConnected();
 
+                
+                
+                    
+
                 var db = redis.GetDatabase();
 
                 // Access the cart from the cache
-                var value = await db.HashGetAsync(userId, CART_FIELD_NAME);
+                var dbTracer = oneAgentSdk.TraceSQLDatabaseRequest(dbInfo, "GET "+CART_FIELD_NAME);
+                var value = await dbTracer.TraceAsync(() =>  db.HashGetAsync(userId, CART_FIELD_NAME));
 
                 Hipstershop.Cart cart;
                 if (value.IsNull)
@@ -145,7 +159,9 @@ namespace cartservice.cartstore
                     }
                 }
 
-                await db.HashSetAsync(userId, new[]{ new HashEntry(CART_FIELD_NAME, cart.ToByteArray()) });
+
+                var dbTracerUpd = oneAgentSdk.TraceSQLDatabaseRequest(dbInfo, "SET "+CART_FIELD_NAME);
+                await dbTracerUpd.TraceAsync(() => db.HashSetAsync(userId, new[] { new HashEntry(CART_FIELD_NAME, cart.ToByteArray()) }));
             }
             catch (Exception ex)
             {
@@ -162,8 +178,10 @@ namespace cartservice.cartstore
                 EnsureRedisConnected();
                 var db = redis.GetDatabase();
 
+                var dbTracerUpd = oneAgentSdk.TraceSQLDatabaseRequest(dbInfo, "SET " + CART_FIELD_NAME);
+
                 // Update the cache with empty cart for given user
-                await db.HashSetAsync(userId, new[] { new HashEntry(CART_FIELD_NAME, emptyCartBytes) });
+                await dbTracerUpd.TraceAsync(() => db.HashSetAsync(userId, new[] { new HashEntry(CART_FIELD_NAME, emptyCartBytes) }));
             }
             catch (Exception ex)
             {
@@ -181,8 +199,9 @@ namespace cartservice.cartstore
 
                 var db = redis.GetDatabase();
 
+                var dbTracer = oneAgentSdk.TraceSQLDatabaseRequest(dbInfo, "GET " + CART_FIELD_NAME);
                 // Access the cart from the cache
-                var value = await db.HashGetAsync(userId, CART_FIELD_NAME);
+                var value = await dbTracer.TraceAsync(() => db.HashGetAsync(userId, CART_FIELD_NAME));
 
                 if (!value.IsNull)
                 {
@@ -203,6 +222,7 @@ namespace cartservice.cartstore
             try
             {
                 var cache = redis.GetDatabase();
+
                 var res = cache.Ping();
                 return res != TimeSpan.Zero;
             }
